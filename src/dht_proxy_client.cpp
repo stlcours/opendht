@@ -472,11 +472,11 @@ DhtProxyClient::getNodesStats(sa_family_t af) const
 void
 DhtProxyClient::getProxyInfos()
 {
-    DHT_LOG.d("Requesting proxy server node information");
-
-    if (ongoingStatusUpdate_.test_and_set())
+    if (ongoingStatusUpdate_.test_and_set()) {
+        DHT_LOG.d("getProxyInfos: request already ongoing...");
         return;
-
+    }
+    DHT_LOG.d("Requesting proxy server node information");
     {
         std::lock_guard<std::mutex> l(lockCurrentProxyInfos_);
         if (statusIpv4_ == NodeStatus::Disconnected)
@@ -490,14 +490,19 @@ DhtProxyClient::getProxyInfos()
 
     // Try to contact the proxy and set the status to connected when done.
     // will change the connectivity status
-    if (statusThread_.joinable())
+    if (statusThread_.joinable()) {
+        DHT_LOG.d("getProxyInfos: joining previous thread");
         statusThread_.join();
+        DHT_LOG.d("getProxyInfos: previous thread ended");
+    }
     statusThread_ = std::thread([this, serverHost]{
         struct SuccessCount {std::atomic_uint ipv4 {0}, ipv6 {0};};
         auto successCount = std::make_shared<SuccessCount>();
         try {
+            DHT_LOG.d("getProxyInfos: resolving %s", serverHost.c_str());
             auto hostAndService = splitPort(serverHost);
             auto resolved_proxies = SockAddr::resolve(hostAndService.first, hostAndService.second);
+            DHT_LOG.d("getProxyInfos: %llu servers", resolved_proxies.size());
             std::vector<std::future<Sp<restbed::Response>>> reqs;
             reqs.reserve(resolved_proxies.size());
             for (const auto& resolved_proxy: resolved_proxies) {
@@ -509,6 +514,7 @@ DhtProxyClient::getProxyInfos()
                 }
                 restbed::Uri uri(proxy::HTTP_PROTO + server + "/");
                 auto req = std::make_shared<restbed::Request>(uri);
+                DHT_LOG.d("getProxyInfos: sending request");
                 reqs.emplace_back(restbed::Http::async(req,
                     [this, resolved_proxy, successCount](
                                 const std::shared_ptr<restbed::Request>&,
@@ -516,10 +522,12 @@ DhtProxyClient::getProxyInfos()
                 {
                     auto code = reply->get_status_code();
                     Json::Value proxyInfos;
+                    DHT_LOG.d("getProxyInfos: got code %d", code);
                     if (code == 200) {
                         restbed::Http::fetch("\n", reply);
                         std::string body;
                         reply->get_body(body);
+                        DHT_LOG.d("getProxyInfos: got body %llu", body.size());
 
                         std::string err;
                         Json::CharReaderBuilder rbuilder;
@@ -544,6 +552,7 @@ DhtProxyClient::getProxyInfos()
         }
         if (successCount->ipv4 == 0) onProxyInfos(Json::Value{}, AF_INET);
         if (successCount->ipv6 == 0) onProxyInfos(Json::Value{}, AF_INET6);
+        DHT_LOG.d("Requesting proxy server node information COMPLETED");
         ongoingStatusUpdate_.clear();
     });
 }
@@ -691,9 +700,9 @@ DhtProxyClient::sendListen(const std::shared_ptr<restbed::Request>& req, const V
                         }
                     }
                 }
-            } catch (std::runtime_error&) {
+            } catch (const std::exception& e) {
                 if (not state->cancel) {
-                    DHT_LOG.w("Listen closed by the proxy server");
+                    DHT_LOG.w("Listen closed by the proxy server: %s", e.what());
                     state->ok = false;
                 }
             }
@@ -712,7 +721,7 @@ DhtProxyClient::sendSubscribe(const std::shared_ptr<restbed::Request>& req, cons
     req->set_method("SUBSCRIBE");
     fillBodyToGetToken(req);
     auto settings = std::make_shared<restbed::Settings>();
-    restbed::Http::async(req, [state, token](const std::shared_ptr<restbed::Request>&,
+    restbed::Http::async(req, [this,state, token](const std::shared_ptr<restbed::Request>&,
                                              const std::shared_ptr<restbed::Response>& reply) {
         auto code = reply->get_status_code();
         if (code == 200) {
@@ -732,8 +741,11 @@ DhtProxyClient::sendSubscribe(const std::shared_ptr<restbed::Request>& req, cons
                     }
                     *token = unpackId(json, "token");
                 }
-            } catch (std::runtime_error&) {
-                // NOTE: Http::close() can occurs here. Ignore this.
+            } catch (const std::exception& e) {
+                if (not state->cancel) {
+                    DHT_LOG.e("sendSubscribe: error: %s", e.what());
+                    state->ok = false;
+                }
             }
         } else {
             state->ok = false;
