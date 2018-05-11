@@ -269,6 +269,7 @@ private:
      * Get informations from the proxy node
      * @return the JSON returned by the proxy
      */
+    struct InfoState;
     void getProxyInfos();
     void onProxyInfos(const Json::Value& val, sa_family_t family);
     SockAddr parsePublicAddress(const Json::Value& val);
@@ -340,6 +341,7 @@ private:
     std::vector<std::function<void()>> callbacks_;
     std::mutex lockCallbacks;
 
+    Sp<InfoState> infoState_;
     std::thread statusThread_;
     mutable std::mutex lockCurrentProxyInfos_;
 
